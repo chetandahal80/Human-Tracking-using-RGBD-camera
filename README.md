@@ -47,6 +47,11 @@ ros2 run human_tracking rgbd
  ```
 This command will start the nodes to subscribe rgb and depth image and performs the human detection and tracking operations.
 
+Also, run the following command for teleoperation of the differential drive robot i.e. to give command velocity to the robot. 
+```
+ros2 run teleop_twist_keyboard teleop_twist_keyboard
+```
+
 ## Dependencies 
 The package relies on the following dependencies:
 * rclpy: ROS2 Python client library.
