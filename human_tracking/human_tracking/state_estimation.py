@@ -1,3 +1,9 @@
+''' This code utilizes Kalman Filter for tracking the detected bounding box in an image frame which is provided as input 
+    The overall code performs two main functions:
+    1. state estimation for all the detected bounding boxes using Kalman Filter
+    2. data assignment between the estimated state of the bounding box and the newly detected bounding box using the Jonker-Volgenant algorithm
+    '''
+
 import numpy as np
 import cv2
 
