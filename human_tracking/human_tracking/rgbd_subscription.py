@@ -11,6 +11,8 @@ import matplotlib.pyplot as plt
 from scipy.signal import find_peaks
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 from .state_estimation import *
+import time
+import torch
 
 
 class RGBDSubscriber(Node):
@@ -21,10 +23,10 @@ class RGBDSubscriber(Node):
         self.ts = ApproximateTimeSynchronizer([self.subscription_rgb, self.subscription_depth], queue_size=10, slop=0.1)
         self.ts.registerCallback(self.sync_callback)
         self.bridge = CvBridge()
-        self.model = YOLO("src/human_tracking/human_tracking/Yolo-weights/yolov8l.pt") # YOLOv8 model for object detection
+        self.model = YOLO("src/human_tracking/human_tracking/Yolo-weights/yolov8m.pt") # YOLOv8 model for object detection
         self.classNames = list(self.model.names.values())
         self.latest_depth_image = None  # Variable to store the latest depth image
-        self.tracker = Tracker(min_iou = 0.3, min_streak = 5, max_age = 20, w_iou = 0.5, w_depth = 0.5) # class initialization for object tracking 
+        self.tracker = Tracker(min_iou = 0.25, min_streak = 3, max_age = 40, w_iou = 0.8, w_depth = 0.2) # class initialization for object tracking 
     
     def get_depth(self, depth_image, bbox_arngd):
         ''' function to get the depth of objects detected
@@ -53,14 +55,23 @@ class RGBDSubscriber(Node):
                 filter_depth = np.where(roi_mask == 1, depth_values, np.nan)
                 valid_depth_values = filter_depth[~np.isnan(filter_depth)]
                 filtered_depth = valid_depth_values[valid_depth_values <= 254]
+                if filtered_depth.size == 0:
+                    actual_depth[key] = 10.0   # no usable depth data — treat as "far/unknown"
+                    continue
                 
-                y, x, _ = plt.hist(filtered_depth, bins = 75, density = False) # histogram to obtain frequency of each depth value
-                plt.close()
+                y, x = np.histogram(filtered_depth, bins = 75) # histogram to obtain frequency of each depth value
+
                 min_count = np.min(y)
                 max_count = np.max(y)
+                if max_count == min_count:
+                    actual_depth[key] = 10.0
+                    continue
                 y = (y - min_count)/(max_count - min_count) # normalized frequency 
                 # obtaining Pd, Sd, F_pd and F_sd i.e. depth value with highgest and secound highest counts and there respective normalized frequency 
                 peaks, _ = find_peaks(y, height = 0.025, distance = 16) 
+                if len(peaks) == 0:
+                    actual_depth[key] = 10.0
+                    continue
                 peak_values = y[peaks]
                 sorted_order = np.argsort(peak_values)[::-1]
                 sorted_indices = peaks[sorted_order]
@@ -98,13 +109,14 @@ class RGBDSubscriber(Node):
     def sync_callback(self, rgb_msg, depth_msg):
         # synchronized call back function for both rgb image and depth image subscriber nodes
         try:
+            start = time.time()
             # Convert ROS Image message to OpenCV image
             img = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding='bgr8')
             depth_image = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
 
             self.latest_depth_image = np.array(depth_image, dtype=np.float32)
             img_copy = self.latest_depth_image.copy()
-            results = self.model(img, stream=True) # obtaining object detection results using YOLOv8 model
+            results = self.model(img, stream=True, device=0, half=True, imgsz=480, verbose=False) # obtaining object detection results using YOLOv8 model
             for r in results:
                 box_depth = {}
                 class_names = []
@@ -137,18 +149,25 @@ class RGBDSubscriber(Node):
                             bbox[f'b{i}'] = [x1, y1, x2, y2, conf]
                             class_names.append(self.classNames[clss])
                             i = i + 1
+                
                 # bounding box sorted as respected to the mean of all depth values of pixels within the box
-                sorted_depth = {k: v for k, v in sorted(box_depth.items(), key=lambda item: np.mean(item[1]))}
+                sorted_depth = {k: v for k, v in sorted(box_depth.items(), key=lambda item: np.mean(item[1]) if item[1].size > 0 else float('inf'))}
                 bbox_ordered = {key: bbox[key] for key in sorted_depth}
-
+                startt = time.time()
                 depth = (self.get_depth(img_copy, bbox_ordered)) # function call to obtain actual depth of each objects 
+                endtt = time.time()
                 for key in bbox:
                     combined = bbox[key] + [depth[key]]
                     state.append(combined)
                 state  = np.array(state)
-                state[:,[4,5]] = state[:,[5,4]]
-
+                if state.size == 0:
+                    state = np.empty((0, 6))
+                else:
+                    state[:, [4, 5]] = state[:, [5, 4]]
                 results_tracker = self.tracker.tracking(state) # tracking the motion of each detected objects
+                
+                print(f"Took {(endtt - startt):.6f} for tracking")
+
 
                 # creating the tracker box for each detected objects
                 for result in results_tracker:
@@ -159,6 +178,10 @@ class RGBDSubscriber(Node):
                     cvzone.putTextRect(img, f'{Id} {dd}', (max(0, xx1), max(25, yy1)), scale=1, thickness=1, offset=5)          
                 cv2.imshow("Image", img)
                 cv2.waitKey(1)
+
+            end = time.time()
+            print(f"Took {(end - start):.6f} for one frame")
+
         except CvBridgeError as e:
             self.get_logger().error(f'CvBridge Error: {str(e)}')
         except Exception as e:
@@ -175,4 +198,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-
