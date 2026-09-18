@@ -69,3 +69,6 @@ The package relies on the following dependencies:
 * message_filters: For synchronizing RGB and depth image messages.
 
 * matplotlib: For histogram computation during depth estimation
+
+## Demo
+[Demo Video Link](https://youtu.be/2z3POaJYvqM)
