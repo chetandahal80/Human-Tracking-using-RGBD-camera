@@ -18,15 +18,18 @@ def linear_assignment(cost_matrix):
         return np.array(list(zip(x, y)))
 
 
-def cost_mat(bb_det, bb_trk, w_iou = 1, w_depth = 0):
+def cost_mat(bb_det, bb_trk, w_iou = 0.4, w_depth = 0.3, w_pos = 0.3, depth_scale = 0.6):
     '''
-    Computes IOU and reciprocal of depth distance between two bboxes in the form [x1,y1,x2,y2,d] and 
-    generates cost matrix based on combined weight
+    Similarity between every detection and every tracker, in [0,1].
+    Three independent cues, each computed per pair only 
+      iou    - box overlap
+      depth  - exp(-|depth difference| / depth_scale)
+      centre - exp(-centre distance / box size), degrades smoothly when the
+               boxes stop overlapping at all instead of falling off a cliff
     '''
     bb_trk = np.expand_dims(bb_trk, 0)
     bb_det = np.expand_dims(bb_det, 1)
-    
-    # cost associated with iou
+
     xx1 = np.maximum(bb_det[..., 0], bb_trk[..., 0])
     yy1 = np.maximum(bb_det[..., 1], bb_trk[..., 1])
     xx2 = np.minimum(bb_det[..., 2], bb_trk[..., 2])
@@ -34,21 +37,18 @@ def cost_mat(bb_det, bb_trk, w_iou = 1, w_depth = 0):
     w = np.maximum(0., xx2 - xx1)
     h = np.maximum(0., yy2 - yy1)
     wh = w * h
-    iou_matrix = wh / ((bb_det[..., 2] - bb_det[..., 0]) * (bb_det[..., 3] - bb_det[..., 1])                                      
-        + (bb_trk[..., 2] - bb_trk[..., 0]) * (bb_trk[..., 3] - bb_trk[..., 1]) - wh)  
+    area_det = (bb_det[..., 2] - bb_det[..., 0]) * (bb_det[..., 3] - bb_det[..., 1])
+    area_trk = (bb_trk[..., 2] - bb_trk[..., 0]) * (bb_trk[..., 3] - bb_trk[..., 1])
+    iou_matrix = wh / np.maximum(area_det + area_trk - wh, 1e-6)
 
-    # cost associated with depth
-    d_det = bb_det[..., 4]
-    d_trk = bb_trk[...,4]    
-    d_matrix = np.abs(d_det - d_trk)
-    epsilon = 1e-6
-    reciprocal_dmatrix = 1/(d_matrix + epsilon) 
-    max_reciprocal_distance = np.max(reciprocal_dmatrix)      
-    normalized_reciprocal_dmatrix = reciprocal_dmatrix / max_reciprocal_distance
+    depth_similarity = np.exp(-np.abs(bb_det[..., 4] - bb_trk[..., 4]) / depth_scale)
 
-    cost = w_iou * iou_matrix + w_depth * normalized_reciprocal_dmatrix # combined cost matrix
-                                 
-    return(cost)  
+    dcx = ((bb_det[..., 0] + bb_det[..., 2]) - (bb_trk[..., 0] + bb_trk[..., 2])) / 2.0
+    dcy = ((bb_det[..., 1] + bb_det[..., 3]) - (bb_trk[..., 1] + bb_trk[..., 3])) / 2.0
+    box_scale = np.maximum(np.sqrt(np.maximum(area_trk, 1.0)), 1.0)
+    centre_similarity = np.exp(-np.sqrt(dcx**2 + dcy**2) / box_scale)
+
+    return w_iou * iou_matrix + w_depth * depth_similarity + w_pos * centre_similarity
 
 
 def convert_bbox_to_z(bbox):
@@ -72,8 +72,10 @@ def convert_x_to_bbox(x,score=None):
     Takes a bounding box in the centre form [x,y,s,r,depth] and returns it in the form
         [x1,y1,x2,y2,depth] where x1,y1 is the top left and x2,y2 is the bottom right
     """
-    w = np.sqrt(x[2] * x[3])
-    h = x[2] / w
+    s = np.maximum(x[2], 1e-6)          #  KF can briefly predict a negative
+    r = np.maximum(x[3], 1e-6)          # area/ratio, which made np.sqrt return NaN
+    w = np.sqrt(s * r)
+    h = s / w
     if(score==None):
         return np.array([x[0]-w/2.,x[1]-h/2.,x[0]+w/2.,x[1]+h/2.,x[4]]).reshape((1,5))
     else:
@@ -172,7 +174,7 @@ class BBTracker():
 
 class Tracker():
     ''' Tracker class for tracking the motion of each objects detected by YOLOv8 algorithm'''
-    def __init__(self, min_iou = 0.3, min_streak = 3, max_age = 1, w_iou = 0.5, w_depth = 0.5):
+    def __init__(self, min_iou = 0.25, min_streak = 3, max_age = 30, w_iou = 0.4, w_depth = 0.3):
         self.trackers = []
         self.min_iou = min_iou # minimum iou required to associate objects in successive frame
         self.min_streak = min_streak # minimum number of apperance required to be considered as detected object
@@ -186,6 +188,7 @@ class Tracker():
             Input: detections = numpy array of size n_r*6 where columns denote x1, y1, x2, y2, depth, confidence
             Output: returns array containing information of tracker box '''
 
+        self.frame_count += 1   
         trackers_list = np.zeros((len(self.trackers),6))
         to_del = []
         ret = []
@@ -222,16 +225,4 @@ class Tracker():
                 self.trackers.pop(length)
         if(len(ret)>0):
             return np.concatenate(ret)
-        return np.empty((0,5))           
-
-
-
-
-        
-
-        
-             
-            
-            
-
-
+        return np.empty((0,5))
